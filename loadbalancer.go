@@ -1,0 +1,90 @@
+package loadbalancer
+
+import (
+	"fmt"
+	"net/http"
+	"net/http/httputil"
+	"net/url"
+	"os"
+)
+
+type Server interface {
+	// Address returns the address with which to access the server
+	Address() string
+
+	// IsAlive returns true if the server is alive and able to serve requests
+	IsAlive() bool
+
+	// Serve uses this server to process the request
+	Serve(rw http.ResponseWriter, req *http.Request)
+}
+
+type SimpleServer struct {
+	addr  string
+	proxy *httputil.ReverseProxy
+}
+
+func (s *SimpleServer) Address() string { return s.addr }
+
+func (s *SimpleServer) IsAlive() bool { return true }
+
+func (s *SimpleServer) Serve(rw http.ResponseWriter, req *http.Request) {
+	s.proxy.ServeHTTP(rw, req)
+}
+
+func NewSimpleServer(addr string) *SimpleServer {
+	serverUrl, err := url.Parse(addr)
+	handleErr(err)
+
+	return &SimpleServer{
+		addr:  addr,
+		proxy: httputil.NewSingleHostReverseProxy(serverUrl),
+	}
+}
+
+type LoadBalancer struct {
+	port            string
+	roundRobinCount int
+	servers         []Server
+}
+
+func NewLoadBalancer(port string, servers []Server) *LoadBalancer {
+	return &LoadBalancer{
+		port:            port,
+		roundRobinCount: 0,
+		servers:         servers,
+	}
+}
+
+// handleErr prints the error and exits the program
+// Note: this is not how one would want to handle errors in production, but
+// serves well for demonstration purposes.
+func handleErr(err error) {
+	if err != nil {
+		fmt.Printf("error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// getNextServerAddr returns the address of the next available server to send a
+// request to, using a simple round-robin algorithm
+func (lb *LoadBalancer) GetNextAvailableServer() Server {
+	server := lb.servers[lb.roundRobinCount%len(lb.servers)]
+	for !server.IsAlive() {
+		lb.roundRobinCount++
+		server = lb.servers[lb.roundRobinCount%len(lb.servers)]
+	}
+	lb.roundRobinCount++
+
+	return server
+}
+
+func (lb *LoadBalancer) ServeProxy(rw http.ResponseWriter, req *http.Request) {
+	targetServer := lb.GetNextAvailableServer()
+
+	// could optionally log stuff about the request here!
+	fmt.Printf("forwarding request to address %q\n", targetServer.Address())
+
+	// could delete pre-existing X-Forwarded-For header to prevent IP spoofing
+	targetServer.Serve(rw, req)
+}
